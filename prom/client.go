@@ -1,6 +1,7 @@
 package prom
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -143,19 +144,18 @@ func (c *Client) TSDBStatus(ctx context.Context) (TSDBStatus, error) {
 	return envelope.Data, nil
 }
 
-func (c *Client) Query(ctx context.Context, expr string, ts time.Time, timeout time.Duration) (Matrix, float64, error) {
-	params := url.Values{"query": {expr}}
+func InstantRequest(expr string, ts time.Time, timeout time.Duration) (string, url.Values) {
+	params := url.Values{"query": {expr}, "limit": {"0"}}
 	if !ts.IsZero() {
 		params.Set("time", formatTime(ts))
 	}
-	params.Set("limit", "0")
 	if timeout > 0 {
 		params.Set("timeout", timeout.String())
 	}
-	return c.query(ctx, "/api/v1/query", params)
+	return "/api/v1/query", params
 }
 
-func (c *Client) QueryRange(ctx context.Context, expr string, start, end time.Time, step time.Duration, timeout time.Duration) (Matrix, float64, error) {
+func RangeRequest(expr string, start, end time.Time, step, timeout time.Duration) (string, url.Values) {
 	params := url.Values{
 		"query": {expr},
 		"start": {formatTime(start)},
@@ -166,10 +166,64 @@ func (c *Client) QueryRange(ctx context.Context, expr string, start, end time.Ti
 	if timeout > 0 {
 		params.Set("timeout", timeout.String())
 	}
-	return c.query(ctx, "/api/v1/query_range", params)
+	return "/api/v1/query_range", params
 }
 
-func (c *Client) query(ctx context.Context, path string, params url.Values) (Matrix, float64, error) {
+// Probe runs a query and only counts the series in the answer. It never holds
+// the body, an answer with 500k series would otherwise cost gigabytes per request.
+func (c *Client) Probe(ctx context.Context, path string, params url.Values) (series int64, elapsed float64, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+path+"?"+params.Encode(), nil)
+	if err != nil {
+		return 0, 0, err
+	}
+	req.Header.Set("Accept", "application/json")
+	start := time.Now()
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return 0, time.Since(start).Seconds(), err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 300))
+		return 0, time.Since(start).Seconds(), fmt.Errorf("%s: http %d: %s", path, resp.StatusCode, strings.TrimSpace(string(snippet)))
+	}
+	series, ok, err := countSeries(resp.Body)
+	elapsed = time.Since(start).Seconds()
+	if err == nil && !ok {
+		err = fmt.Errorf("%s: answer is not a success response", path)
+	}
+	return series, elapsed, err
+}
+
+var (
+	successPrefix = []byte(`{"status":"success"`)
+	seriesMarker  = []byte(`"metric":`)
+)
+
+func countSeries(r io.Reader) (series int64, success bool, err error) {
+	head := make([]byte, len(successPrefix))
+	if _, err := io.ReadFull(r, head); err != nil {
+		return 0, false, nil
+	}
+	success = bytes.Equal(head, successPrefix)
+	series = int64(bytes.Count(head, seriesMarker))
+	carry := append([]byte(nil), head[len(head)-len(seriesMarker)+1:]...)
+	buf := make([]byte, 64<<10)
+	for {
+		n, rerr := r.Read(buf)
+		chunk := append(carry, buf[:n]...)
+		series += int64(bytes.Count(chunk, seriesMarker))
+		carry = append([]byte(nil), chunk[max(0, len(chunk)-len(seriesMarker)+1):]...)
+		if rerr == io.EOF {
+			return series, success, nil
+		}
+		if rerr != nil {
+			return series, success, rerr
+		}
+	}
+}
+
+func (c *Client) Fetch(ctx context.Context, path string, params url.Values) (Matrix, float64, error) {
 	var m Matrix
 	start := time.Now()
 	body, err := c.get(ctx, path+"?"+params.Encode())

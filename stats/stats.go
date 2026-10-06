@@ -38,20 +38,6 @@ func (r *Recorder) Observe(d time.Duration) {
 	r.mu.Unlock()
 }
 
-func (r *Recorder) ObserveN(d time.Duration, n int) {
-	if n <= 0 {
-		return
-	}
-	ms := float64(d) / float64(time.Millisecond)
-	r.mu.Lock()
-	for i := 0; i < n; i++ {
-		r.samples = append(r.samples, ms)
-	}
-	r.sum += ms * float64(n)
-	r.count += int64(n)
-	r.mu.Unlock()
-}
-
 func (r *Recorder) Count() int64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -103,14 +89,4 @@ func clamp(v, lo, hi int) int {
 		return hi
 	}
 	return v
-}
-
-func Quantile(values []float64, q float64) float64 {
-	if len(values) == 0 {
-		return 0
-	}
-	sorted := make([]float64, len(values))
-	copy(sorted, values)
-	sort.Float64s(sorted)
-	return quantileSorted(sorted, q)
 }

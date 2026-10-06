@@ -1,6 +1,7 @@
 package collector
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -39,13 +40,6 @@ type Collector struct {
 	degraded       []string
 }
 
-func joinError(a, b string) string {
-	if a == "" {
-		return b
-	}
-	return a + "; " + b
-}
-
 func New(cfg Config) *Collector {
 	c := &Collector{cfg: cfg, engine: prom.New(cfg.Target, 30*time.Second)}
 	if cfg.UseCgroup {
@@ -62,12 +56,12 @@ func (c *Collector) Run(ctx context.Context, out io.Writer) error {
 	deadline := time.Now().Add(c.cfg.Duration)
 	pending := time.Now()
 	for {
-		if err := c.sample(ctx); err != nil && len(c.degraded) < 8 {
+		if err := c.findPod(ctx); err != nil && len(c.degraded) < 8 {
 			c.degraded = append(c.degraded, err.Error())
 		}
 		sample, err := c.Sample(ctx)
 		if err != nil {
-			sample.Error = joinError(sample.Error, err.Error())
+			sample.Error = strings.TrimPrefix(sample.Error+"; "+err.Error(), "; ")
 		}
 		body, err := json.Marshal(sample)
 		if err != nil {
@@ -92,7 +86,7 @@ func (c *Collector) Run(ctx context.Context, out io.Writer) error {
 	}
 }
 
-func (c *Collector) sample(ctx context.Context) error {
+func (c *Collector) findPod(ctx context.Context) error {
 	if c.kube != nil && c.podName == "" {
 		pods, err := c.kube.PodsInNamespace(ctx, c.cfg.Namespace, c.cfg.PodLabel)
 		if err != nil {
@@ -181,25 +175,14 @@ var selfMetrics = []string{
 	"prompp_common_jemalloc_memory_threshold_bytes",
 }
 
-var cadvisorMetrics = map[string][]string{
-	"engine": {
-		"container_memory_working_set_bytes",
-		"container_memory_usage_bytes",
-		"container_memory_rss",
-		"container_memory_failcnt",
-		"container_cpu_usage_seconds_total",
-		"container_spec_memory_limit_bytes",
-		"container_oom_events_total",
-	},
-	"node": {
-		"machine_memory_bytes",
-		"machine_memory_available_bytes",
-		"machine_cpu_cores",
-		"node_memory_working_set_bytes",
-		"node_cpu_seconds_total",
-		"filesystem_avail_bytes",
-		"filesystem_capacity_bytes",
-	},
+var cadvisorMetrics = []string{
+	"container_memory_working_set_bytes",
+	"container_memory_usage_bytes",
+	"container_memory_rss",
+	"container_memory_failcnt",
+	"container_cpu_usage_seconds_total",
+	"container_spec_memory_limit_bytes",
+	"container_oom_events_total",
 }
 
 func (c *Collector) cadvisor(ctx context.Context) (map[string]float64, error) {
@@ -212,27 +195,10 @@ func (c *Collector) cadvisor(ctx context.Context) (map[string]float64, error) {
 		return nil, err
 	}
 	out := map[string]float64{}
-	for name, mf := range families {
-		if want, ok := cadvisorMetrics["engine"]; ok && contains(want, name) {
-			for _, m := range mf.GetMetric() {
-				if labelsMatch(m, map[string]string{
-					"namespace": c.cfg.Namespace,
-					"pod":       c.podName,
-					"container": "engine",
-				}) {
-					out["engine_"+name] = value(m)
-				}
-			}
-			continue
-		}
-		if contains(cadvisorMetrics["node"], name) {
-			for _, m := range mf.GetMetric() {
-				if name == "node_cpu_seconds_total" && m.GetLabel() != nil && labelValue(m, "mode") != "idle" {
-					continue
-				}
-				if len(m.GetLabel()) == 0 || (name != "node_cpu_seconds_total" && name != "filesystem_avail_bytes" && name != "filesystem_capacity_bytes") {
-					out["node_"+name] = value(m)
-				}
+	for _, name := range cadvisorMetrics {
+		for _, m := range families[name].GetMetric() {
+			if labelValue(m, "namespace") == c.cfg.Namespace && labelValue(m, "pod") == c.podName && labelValue(m, "container") == "engine" {
+				out["engine_"+name] = value(m)
 			}
 		}
 	}
@@ -244,20 +210,7 @@ func (c *Collector) cadvisor(ctx context.Context) (map[string]float64, error) {
 
 func parseText(body []byte) (map[string]*dto.MetricFamily, error) {
 	var parser expfmt.TextParser
-	families, err := parser.TextToMetricFamilies(strings.NewReader(string(body)))
-	if err != nil {
-		return nil, err
-	}
-	return families, nil
-}
-
-func labelsMatch(m *dto.Metric, want map[string]string) bool {
-	for k, v := range want {
-		if labelValue(m, k) != v {
-			return false
-		}
-	}
-	return true
+	return parser.TextToMetricFamilies(bytes.NewReader(body))
 }
 
 func labelValue(m *dto.Metric, name string) string {
@@ -270,23 +223,10 @@ func labelValue(m *dto.Metric, name string) string {
 }
 
 func value(m *dto.Metric) float64 {
-	switch {
-	case m.GetGauge() != nil:
-		return m.GetGauge().GetValue()
-	case m.GetCounter() != nil:
-		return m.GetCounter().GetValue()
-	default:
-		return 0
+	if g := m.GetGauge(); g != nil {
+		return g.GetValue()
 	}
-}
-
-func contains(list []string, s string) bool {
-	for _, v := range list {
-		if v == s {
-			return true
-		}
-	}
-	return false
+	return m.GetCounter().GetValue()
 }
 
 func pick(all map[string]float64, names []string) map[string]float64 {

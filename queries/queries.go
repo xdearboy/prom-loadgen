@@ -94,14 +94,6 @@ func Get(name string) ([]Query, error) {
 	return q, nil
 }
 
-func MustGet(name string) []Query {
-	q, err := Get(name)
-	if err != nil {
-		panic(err)
-	}
-	return q
-}
-
 func (q Query) StepDuration() (time.Duration, error) {
 	switch q.Step {
 	case "":

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 )
@@ -66,57 +67,28 @@ func TestFormatTimeUsesSecondsNotMilliseconds(t *testing.T) {
 	}
 }
 
-func TestQuerySendsSecondPrecisionTime(t *testing.T) {
-	var gotQuery, gotTime, gotStep string
+func TestRequestsSendSeconds(t *testing.T) {
+	var got url.Values
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotQuery = r.URL.Query().Get("query")
-		gotTime = r.URL.Query().Get("time")
-		gotStep = r.URL.Query().Get("step")
+		got = r.URL.Query()
 		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"matrix","result":[]}}`))
 	}))
 	defer srv.Close()
-
 	c := New(srv.URL, 5*time.Second)
-	if _, _, err := c.Query(context.Background(), "bench_cpu_cores", time.UnixMilli(1767225645123), 5*time.Second); err != nil {
-		t.Fatalf("Query: %v", err)
+
+	path, params := InstantRequest("bench_cpu_cores", time.UnixMilli(1767225645123), 5*time.Second)
+	if _, _, err := c.Fetch(context.Background(), path, params); err != nil {
+		t.Fatal(err)
 	}
-	if gotQuery != "bench_cpu_cores" {
-		t.Errorf("query = %q", gotQuery)
-	}
-	if gotTime != "1767225645.123" {
-		t.Errorf("time = %q, want 1767225645.123 (seconds, not milliseconds)", gotTime)
+	if got.Get("time") != "1767225645.123" {
+		t.Errorf("time = %q, want seconds with millisecond fraction", got.Get("time"))
 	}
 
-	if _, _, err := c.QueryRange(context.Background(), "bench_cpu_cores",
-		time.UnixMilli(1767225600000), time.UnixMilli(1767225600000+3600000), 30*time.Second, 5*time.Second); err != nil {
-		t.Fatalf("QueryRange: %v", err)
+	path, params = RangeRequest("bench_cpu_cores", time.UnixMilli(1767225600000), time.UnixMilli(1767229200000), 30*time.Second, 5*time.Second)
+	if _, _, err := c.Fetch(context.Background(), path, params); err != nil {
+		t.Fatal(err)
 	}
-	if gotStep != "30" {
-		t.Errorf("step = %q, want 30", gotStep)
+	if got.Get("step") != "30" || got.Get("start") != "1767225600.000" {
+		t.Errorf("step %q start %q", got.Get("step"), got.Get("start"))
 	}
-	if got := srvURLQuery(t, srv.URL, "/api/v1/query_range", map[string]string{
-		"query": "bench_cpu_cores", "start": "1767225600", "end": "1767225660", "step": "15",
-	}); got == "" {
-		t.Error("expected a rendered query_range url")
-	}
-}
-
-func srvURLQuery(t *testing.T, base, path string, params map[string]string) string {
-	t.Helper()
-	u := base + path
-	first := true
-	for k, v := range params {
-		if first {
-			u += "?" + k + "=" + v
-			first = false
-		} else {
-			u += "&" + k + "=" + v
-		}
-	}
-	resp, err := http.Get(u)
-	if err != nil {
-		t.Fatalf("get %s: %v", u, err)
-	}
-	defer resp.Body.Close()
-	return u
 }

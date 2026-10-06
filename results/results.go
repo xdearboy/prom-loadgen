@@ -17,7 +17,6 @@ const (
 	KindIngest = "ingest"
 	KindQuery  = "query"
 	KindDump   = "dump"
-	KindDisk   = "disk"
 	KindMeta   = "run"
 )
 
@@ -51,8 +50,6 @@ type StepResources struct {
 	Restarts           int64   `json:"restarts"`
 }
 
-// IngestStep counts requests in RequestsOK, HTTP4xx, HTTP5xx and ClientErrors,
-// and samples in SamplesSent and SamplesFailed.
 type IngestStep struct {
 	Index                  int            `json:"index"`
 	Series                 int            `json:"series"`
@@ -79,8 +76,7 @@ type IngestStep struct {
 	Resources              *StepResources `json:"resources,omitempty"`
 }
 
-// Overran reports a step that took longer than planned, the engine or the
-// harness could not keep up with the offered rate.
+// a step that ran long means the offered rate was not sustained
 func (s IngestStep) Overran() bool {
 	return s.ElapsedSeconds > s.DurationSeconds+s.IntervalSeconds
 }
@@ -217,7 +213,6 @@ type Sample struct {
 	Self           map[string]float64 `json:"self,omitempty"`
 	Head           map[string]float64 `json:"head,omitempty"`
 	Cadvisor       map[string]float64 `json:"cadvisor,omitempty"`
-	Node           map[string]float64 `json:"node,omitempty"`
 	GOMEMLimit     string             `json:"gomemlimit,omitempty"`
 	GOGC           string             `json:"gogc,omitempty"`
 	GOMAXPROCS     string             `json:"gomaxprocs,omitempty"`
@@ -241,8 +236,6 @@ type DiskArtifact struct {
 	Samples []DiskSample `json:"samples"`
 }
 
-// At returns the last disk sample taken at or before t, disk usage at the end
-// of a step is what the step is attributed.
 func (d *DiskArtifact) At(t time.Time) (DiskSample, bool) {
 	var out DiskSample
 	found := false
@@ -367,8 +360,6 @@ func ListArtifacts(root, runID, kind string) ([]string, error) {
 	return out, nil
 }
 
-// ArtifactVariants returns every artifact of a kind for one engine. Producers
-// emit variants such as query-core-c4.json, so a single fixed name is not enough.
 func ArtifactVariants(root, runID, kind, engine string) []string {
 	engineDir := EngineDir(root, runID, engine)
 	entries, err := os.ReadDir(engineDir)
@@ -409,46 +400,28 @@ func ListEngines(root, runID string) ([]string, error) {
 	return out, nil
 }
 
-func ReadDiskSamples(path string) ([]DiskSample, error) {
-	body, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var out []DiskSample
-	for i, line := range strings.Split(string(body), "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		var s DiskSample
-		if err := json.Unmarshal([]byte(line), &s); err != nil {
-			return nil, fmt.Errorf("%s line %d: %w", path, i+1, err)
-		}
-		out = append(out, s)
-	}
-	if len(out) == 0 {
-		return nil, errors.New("no disk samples in " + path)
-	}
-	return out, nil
-}
+func ReadDiskSamples(path string) ([]DiskSample, error) { return readLines[DiskSample](path) }
 
-func ReadSamples(path string) ([]Sample, error) {
+func ReadSamples(path string) ([]Sample, error) { return readLines[Sample](path) }
+
+func readLines[T any](path string) ([]T, error) {
 	body, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	var out []Sample
+	var out []T
 	for i, line := range strings.Split(string(body), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		var s Sample
-		if err := json.Unmarshal([]byte(line), &s); err != nil {
+		var v T
+		if err := json.Unmarshal([]byte(line), &v); err != nil {
 			return nil, fmt.Errorf("%s line %d: %w", path, i+1, err)
 		}
-		out = append(out, s)
+		out = append(out, v)
 	}
 	if len(out) == 0 {
-		return nil, errors.New("no samples in " + path)
+		return nil, errors.New("no records in " + path)
 	}
 	return out, nil
 }
